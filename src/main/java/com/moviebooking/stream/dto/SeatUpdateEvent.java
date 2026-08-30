@@ -9,5 +9,6 @@ public record SeatUpdateEvent(
     String seatCode,
     String status,          // AVAILABLE, HELD, BOOKED
     Long heldByUserId,      // null unless HELD
-    String reason           // "HELD", "BOOKED", "RELEASED", "EXPIRED"
+    String reason,          // "HELD", "BOOKED", "RELEASED", "EXPIRED"
+    BigDecimal price        // Price for display when seat becomes available
 ) {}

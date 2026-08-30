@@ -382,6 +382,7 @@ let selectedSeats = [];
 let activeBookingId = null;
 let holdCountdownInterval = null;
 let holdExpiresAt = null;
+let seatEventSource = null; // SSE connection for real-time seat updates
 
 // On page load, check if there's an active hold session to resume
 function resumeHoldSession() {
@@ -531,6 +532,9 @@ async function initiateBooking(showId, theatreName, time, screenName) {
 // Renders the screen's real grid: tier colours, and pathways left as gaps in the
 // exact columns the theatre drew them.
 async function fetchAndRenderSeats(showId) {
+    // Connect to SSE stream for real-time updates when entering seat selection
+    connectToSeatStream(showId);
+    
     const grid = document.getElementById('seatGrid');
     grid.innerHTML = '<div class="loading-spinner">Loading seats...</div>';
 
@@ -850,14 +854,92 @@ function clearHoldCountdown() {
     }
 }
 
-// Update goBackToMovieDetail to also clear hold session
+// Update goBackToMovieDetail to also clear hold session and disconnect SSE
 function goBackToMovieDetail() {
     document.getElementById('seatSelectionView').classList.add('hidden');
     document.getElementById('movieDetailView').classList.remove('hidden');
     selectedSeats = [];
     requiredSeatCount = 0;
+    disconnectFromSeatStream(); // Disconnect SSE when leaving seat selection
     clearHoldSession(); // Clear the hold session when leaving seat selection
     updateCheckoutBar();
+}
+
+// Connect to SSE stream for real-time seat updates with exponential backoff reconnection
+function connectToSeatStream(showId) {
+    // Disconnect any existing connection first
+    disconnectFromSeatStream();
+    
+    const token = localStorage.getItem('accessToken');
+    if (!token) {
+        console.log('[SSE] No auth token, skipping SSE connection');
+        return;
+    }
+    
+    const streamUrl = `/api/stream/shows/${showId}/seats?token=${encodeURIComponent(token)}`;
+    console.log('[SSE] Connecting to:', streamUrl);
+    
+    seatEventSource = new EventSource(streamUrl);
+    
+    let reconnectDelay = 1000; // Start with 1 second
+    const maxReconnectDelay = 30000; // Max 30 seconds
+    
+    seatEventSource.onopen = () => {
+        console.log('[SSE] Connection opened for show', showId);
+        reconnectDelay = 1000; // Reset delay on successful connection
+    };
+    
+    seatEventSource.onmessage = (event) => {
+        try {
+            const update = JSON.parse(event.data);
+            console.log('[SSE] Received seat update:', update);
+            
+            // Find the seat element and update its status
+            const seatElement = document.querySelector(`[data-id="${update.seatCode}"]`);
+            if (seatElement) {
+                const isHeldByMe = update.status === 'HELD' && update.heldByMe === true;
+                const isTaken = update.status === 'BOOKED' || (update.status === 'HELD' && !isHeldByMe);
+                
+                // Update classes
+                seatElement.classList.remove('available', 'held', 'booked');
+                if (isTaken) {
+                    seatElement.classList.add('booked');
+                    seatElement.title = `${update.seatCode} - unavailable`;
+                    seatElement.onclick = null; // Remove click handler
+                } else if (isHeldByMe) {
+                    seatElement.classList.add('held');
+                    seatElement.title = `${update.seatCode} - Held by you (expires in countdown)`;
+                } else {
+                    seatElement.classList.add('available');
+                    seatElement.title = `${update.seatCode} - ₹${update.price}`;
+                    seatElement.onclick = () => toggleSeatSelection(seatElement, update.seatCode);
+                }
+            }
+        } catch (err) {
+            console.error('[SSE] Error processing event:', err);
+        }
+    };
+    
+    seatEventSource.onerror = (err) => {
+        console.error('[SSE] Connection error:', err);
+        seatEventSource.close();
+        
+        // Exponential backoff reconnection
+        setTimeout(() => {
+            console.log(`[SSE] Reconnecting in ${reconnectDelay}ms...`);
+            connectToSeatStream(showId);
+            reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+        }, reconnectDelay);
+    };
+}
+
+// Disconnect from SSE stream
+function disconnectFromSeatStream() {
+    if (seatEventSource) {
+        console.log('[SSE] Disconnecting from stream');
+        seatEventSource.close();
+        seatEventSource = null;
+    }
 }
 
 // Quick access to My Bookings from the catalog page
