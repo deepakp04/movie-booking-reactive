@@ -362,7 +362,7 @@ public class BookingService {
             
             // Broadcast real-time seat update via SSE
             seatStreamService.broadcastSeatUpdate(show.getId(), 
-                new SeatUpdateEvent(show.getId(), s.getSeatCode(), "HELD", user.getId(), true, "HELD"));
+                new SeatUpdateEvent(show.getId(), s.getSeatCode(), "HELD", user.getId(), true, "HELD", s.getPrice()));
         }
         showSeatRepository.saveAll(lockedSeats);
 
@@ -445,7 +445,7 @@ public class BookingService {
                 
                 // Broadcast real-time seat update via SSE
                 seatStreamService.broadcastSeatUpdate(booking.getShow().getId(),
-                    new SeatUpdateEvent(booking.getShow().getId(), s.getSeatCode(), "AVAILABLE", null, false, "RELEASED"));
+                    new SeatUpdateEvent(booking.getShow().getId(), s.getSeatCode(), "AVAILABLE", null, false, "RELEASED", s.getPrice()));
             }
         }
         showSeatRepository.saveAll(seats);
@@ -473,7 +473,7 @@ public class BookingService {
             
             // Broadcast real-time seat update via SSE for expired holds
             seatStreamService.broadcastSeatUpdate(showId,
-                new SeatUpdateEvent(showId, seatCode, "AVAILABLE", null, false, "EXPIRED"));
+                new SeatUpdateEvent(showId, seatCode, "AVAILABLE", null, false, "EXPIRED", s.getPrice()));
         }
         showSeatRepository.saveAll(expired);
 

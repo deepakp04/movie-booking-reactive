@@ -29,6 +29,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.HexFormat;
+import java.util.List;
 
 @Service
 public class PaymentService {
@@ -84,7 +85,7 @@ public class PaymentService {
             for (String code : seatCodes) {
                 seatStreamService.broadcastSeatUpdate(
                     booking.getShow().getId(),
-                    new SeatUpdateEvent(booking.getShow().getId(), code, "AVAILABLE", null, "EXPIRED")
+                    new SeatUpdateEvent(booking.getShow().getId(), code, "AVAILABLE", null, null, "EXPIRED", null)
                 );
             }
             
@@ -284,7 +285,7 @@ public class PaymentService {
             for (String code : seatCodes) {
                 seatStreamService.broadcastSeatUpdate(
                     booking.getShow().getId(),
-                    new SeatUpdateEvent(booking.getShow().getId(), code, "AVAILABLE", null, "EXPIRED")
+                    new SeatUpdateEvent(booking.getShow().getId(), code, "AVAILABLE", null, null, "EXPIRED", null)
                 );
             }
             
