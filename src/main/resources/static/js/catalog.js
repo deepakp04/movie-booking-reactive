@@ -382,6 +382,7 @@ let selectedSeats = [];
 let activeBookingId = null;
 let holdCountdownInterval = null;
 let holdExpiresAt = null;
+let seatEventSource = null; // SSE connection for real-time seat updates
 
 // On page load, check if there's an active hold session to resume
 function resumeHoldSession() {
@@ -426,15 +427,20 @@ function clearHoldSession() {
     clearHoldCountdown();
 }
 
-// Authenticated helper - booking endpoints always require a valid JWT
+// Authenticated helper for booking endpoints (under /api/booking)
 async function bookingApiCall(endpoint, method = 'GET', body = null) {
+    return authenticatedApiCall('/api/booking', endpoint, method, body);
+}
+
+// Generic authenticated API call helper
+async function authenticatedApiCall(basePath, endpoint, method = 'GET', body = null) {
     const token = localStorage.getItem('accessToken');
     const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
     };
 
-    const response = await fetch(`${BOOKING_API_BASE}${endpoint}`, {
+    const response = await fetch(`${basePath}${endpoint}`, {
         method,
         headers,
         body: body ? JSON.stringify(body) : null
@@ -454,6 +460,11 @@ async function bookingApiCall(endpoint, method = 'GET', body = null) {
     }
 
     return result;
+}
+
+// Authenticated helper for payment endpoints (under /api/payment)
+async function paymentApiCall(endpoint, method = 'GET', body = null) {
+    return authenticatedApiCall('/api/payment', endpoint, method, body);
 }
 
 // 1. Triggered when a user clicks a showtime pill in VIEW 3
@@ -531,6 +542,9 @@ async function initiateBooking(showId, theatreName, time, screenName) {
 // Renders the screen's real grid: tier colours, and pathways left as gaps in the
 // exact columns the theatre drew them.
 async function fetchAndRenderSeats(showId) {
+    // Connect to SSE stream for real-time updates when entering seat selection
+    connectToSeatStream(showId);
+    
     const grid = document.getElementById('seatGrid');
     grid.innerHTML = '<div class="loading-spinner">Loading seats...</div>';
 
@@ -692,22 +706,24 @@ function goBackToMovieDetail() {
 }
 
 // 5. Hold the selected seats for 10 minutes (non-refundable policy shown before payment)
+// Then create Razorpay order and open checkout
 async function proceedToPayment() {
     if (selectedSeats.length === 0) return;
 
     const confirmed = confirm(
-        `You're about to hold ${selectedSeats.length} seat(s) for 10 minutes.\n\n` +
+        `You're about to hold ${selectedSeats.length} seat(s).\n\n` +
         `Tickets are 100% NON-REFUNDABLE once payment is completed.\n\nContinue?`
     );
     if (!confirmed) return;
 
     try {
-        const res = await bookingApiCall('/hold', 'POST', {
+        // Step 1: Hold the seats
+        const holdRes = await bookingApiCall('/hold', 'POST', {
             showId: activeShowContext.showId,
             seatCodes: selectedSeats
         });
 
-        const booking = res.data;
+        const booking = holdRes.data;
         activeBookingId = booking.bookingId;
         holdExpiresAt = new Date(booking.holdExpiresAt).getTime();
 
@@ -716,7 +732,7 @@ async function proceedToPayment() {
 
         showAlert(
             `Seats held: ${booking.seatCodes.join(', ')} | Total ₹${booking.totalAmount} | ` +
-            `Transaction ref: ${booking.transactionId}. Complete payment within 10 minutes.`,
+            `Transaction ref: ${booking.transactionId}.`,
             'success'
         );
 
@@ -724,8 +740,63 @@ async function proceedToPayment() {
         await fetchAndRenderSeats(activeShowContext.showId);
         selectedSeats = [];
         updateCheckoutBar();
-        // Payment module (Razorpay) plugs in here next - for now the hold itself
-        // is the end of the booking-core flow.
+
+        // Step 2: Create Razorpay order (this extends hold to 20 minutes)
+        const orderRes = await paymentApiCall('/orders', 'POST', {
+            bookingId: activeBookingId
+        });
+
+        const order = orderRes.data;
+        
+        // Update countdown to reflect extended hold
+        holdExpiresAt = new Date(order.expiresAt).getTime();
+        saveHoldSession();
+
+        // Step 3: Open Razorpay Checkout
+        const options = {
+            key: order.razorpayKeyId,
+            amount: Math.round(parseFloat(order.amount) * 100), // Convert to paise
+            currency: order.currency,
+            name: 'Movie Booking System',
+            description: 'Ticket Purchase',
+            order_id: order.razorpayOrderId,
+            handler: async function(response) {
+                // Payment successful - verify on server
+                try {
+                    const verifyRes = await paymentApiCall('/verify', 'POST', {
+                        razorpayOrderId: response.razorpay_order_id,
+                        razorpayPaymentId: response.razorpay_payment_id,
+                        razorpaySignature: response.razorpay_signature
+                    });
+
+                    if (verifyRes.success) {
+                        showAlert('Payment successful! Your booking is confirmed.', 'success');
+                        clearHoldSession();
+                        // Redirect to bookings page or confirmation
+                        setTimeout(() => window.location.href = '/auth.html', 2000);
+                    }
+                } catch (err) {
+                    showAlert('Payment verification failed. Please contact support.', 'error');
+                }
+            },
+            prefill: {
+                name: localStorage.getItem('userName') || '',
+                email: localStorage.getItem('userEmail') || '',
+                contact: ''
+            },
+            theme: {
+                color: '#6c5ce7'
+            },
+            modal: {
+                ondismiss: function() {
+                    showAlert('Payment cancelled. Your seats will be released in 20 minutes.', 'error');
+                }
+            }
+        };
+
+        const rzp = new Razorpay(options);
+        rzp.open();
+
     } catch (err) {
         // Error already shown by bookingApiCall; refresh seat map since
         // someone may have grabbed a seat in the meantime.
@@ -793,14 +864,92 @@ function clearHoldCountdown() {
     }
 }
 
-// Update goBackToMovieDetail to also clear hold session
+// Update goBackToMovieDetail to also clear hold session and disconnect SSE
 function goBackToMovieDetail() {
     document.getElementById('seatSelectionView').classList.add('hidden');
     document.getElementById('movieDetailView').classList.remove('hidden');
     selectedSeats = [];
     requiredSeatCount = 0;
+    disconnectFromSeatStream(); // Disconnect SSE when leaving seat selection
     clearHoldSession(); // Clear the hold session when leaving seat selection
     updateCheckoutBar();
+}
+
+// Connect to SSE stream for real-time seat updates with exponential backoff reconnection
+function connectToSeatStream(showId) {
+    // Disconnect any existing connection first
+    disconnectFromSeatStream();
+    
+    const token = localStorage.getItem('accessToken');
+    if (!token) {
+        console.log('[SSE] No auth token, skipping SSE connection');
+        return;
+    }
+    
+    const streamUrl = `/api/stream/shows/${showId}/seats?token=${encodeURIComponent(token)}`;
+    console.log('[SSE] Connecting to:', streamUrl);
+    
+    seatEventSource = new EventSource(streamUrl);
+    
+    let reconnectDelay = 1000; // Start with 1 second
+    const maxReconnectDelay = 30000; // Max 30 seconds
+    
+    seatEventSource.onopen = () => {
+        console.log('[SSE] Connection opened for show', showId);
+        reconnectDelay = 1000; // Reset delay on successful connection
+    };
+    
+    seatEventSource.onmessage = (event) => {
+        try {
+            const update = JSON.parse(event.data);
+            console.log('[SSE] Received seat update:', update);
+            
+            // Find the seat element and update its status
+            const seatElement = document.querySelector(`[data-id="${update.seatCode}"]`);
+            if (seatElement) {
+                const isHeldByMe = update.status === 'HELD' && update.heldByMe === true;
+                const isTaken = update.status === 'BOOKED' || (update.status === 'HELD' && !isHeldByMe);
+                
+                // Update classes
+                seatElement.classList.remove('available', 'held', 'booked');
+                if (isTaken) {
+                    seatElement.classList.add('booked');
+                    seatElement.title = `${update.seatCode} - unavailable`;
+                    seatElement.onclick = null; // Remove click handler
+                } else if (isHeldByMe) {
+                    seatElement.classList.add('held');
+                    seatElement.title = `${update.seatCode} - Held by you (expires in countdown)`;
+                } else {
+                    seatElement.classList.add('available');
+                    seatElement.title = `${update.seatCode} - ₹${update.price}`;
+                    seatElement.onclick = () => toggleSeatSelection(seatElement, update.seatCode);
+                }
+            }
+        } catch (err) {
+            console.error('[SSE] Error processing event:', err);
+        }
+    };
+    
+    seatEventSource.onerror = (err) => {
+        console.error('[SSE] Connection error:', err);
+        seatEventSource.close();
+        
+        // Exponential backoff reconnection
+        setTimeout(() => {
+            console.log(`[SSE] Reconnecting in ${reconnectDelay}ms...`);
+            connectToSeatStream(showId);
+            reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+        }, reconnectDelay);
+    };
+}
+
+// Disconnect from SSE stream
+function disconnectFromSeatStream() {
+    if (seatEventSource) {
+        console.log('[SSE] Disconnecting from stream');
+        seatEventSource.close();
+        seatEventSource = null;
+    }
 }
 
 // Quick access to My Bookings from the catalog page

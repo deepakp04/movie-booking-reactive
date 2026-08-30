@@ -43,4 +43,12 @@ public interface ShowSeatRepository extends JpaRepository<ShowSeat, Long> {
     List<String> findMaterializedShowLabelsForScreen(@Param("screenId") Long screenId);
 
     long countByShowIdAndStatus(Long showId, com.moviebooking.booking.model.SeatStatus status);
+
+    // Find held seats for a specific booking with lock
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT s FROM ShowSeat s WHERE s.bookingId = :bookingId AND s.status = :status")
+    List<ShowSeat> findByBookingIdAndStatusForUpdate(
+        @Param("bookingId") Long bookingId,
+        @Param("status") com.moviebooking.booking.model.SeatStatus status
+    );
 }
