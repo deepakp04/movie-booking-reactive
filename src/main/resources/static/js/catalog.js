@@ -427,15 +427,20 @@ function clearHoldSession() {
     clearHoldCountdown();
 }
 
-// Authenticated helper - booking endpoints always require a valid JWT
+// Authenticated helper for booking endpoints (under /api/booking)
 async function bookingApiCall(endpoint, method = 'GET', body = null) {
+    return authenticatedApiCall('/api/booking', endpoint, method, body);
+}
+
+// Generic authenticated API call helper
+async function authenticatedApiCall(basePath, endpoint, method = 'GET', body = null) {
     const token = localStorage.getItem('accessToken');
     const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
     };
 
-    const response = await fetch(`${BOOKING_API_BASE}${endpoint}`, {
+    const response = await fetch(`${basePath}${endpoint}`, {
         method,
         headers,
         body: body ? JSON.stringify(body) : null
@@ -455,6 +460,11 @@ async function bookingApiCall(endpoint, method = 'GET', body = null) {
     }
 
     return result;
+}
+
+// Authenticated helper for payment endpoints (under /api/payment)
+async function paymentApiCall(endpoint, method = 'GET', body = null) {
+    return authenticatedApiCall('/api/payment', endpoint, method, body);
 }
 
 // 1. Triggered when a user clicks a showtime pill in VIEW 3
@@ -732,7 +742,7 @@ async function proceedToPayment() {
         updateCheckoutBar();
 
         // Step 2: Create Razorpay order (this extends hold to 20 minutes)
-        const orderRes = await bookingApiCall('/payment/orders', 'POST', {
+        const orderRes = await paymentApiCall('/orders', 'POST', {
             bookingId: activeBookingId
         });
 
@@ -753,7 +763,7 @@ async function proceedToPayment() {
             handler: async function(response) {
                 // Payment successful - verify on server
                 try {
-                    const verifyRes = await bookingApiCall('/payment/verify', 'POST', {
+                    const verifyRes = await paymentApiCall('/verify', 'POST', {
                         razorpayOrderId: response.razorpay_order_id,
                         razorpayPaymentId: response.razorpay_payment_id,
                         razorpaySignature: response.razorpay_signature
