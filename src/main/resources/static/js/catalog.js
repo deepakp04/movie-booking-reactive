@@ -692,22 +692,24 @@ function goBackToMovieDetail() {
 }
 
 // 5. Hold the selected seats for 10 minutes (non-refundable policy shown before payment)
+// Then create Razorpay order and open checkout
 async function proceedToPayment() {
     if (selectedSeats.length === 0) return;
 
     const confirmed = confirm(
-        `You're about to hold ${selectedSeats.length} seat(s) for 10 minutes.\n\n` +
+        `You're about to hold ${selectedSeats.length} seat(s).\n\n` +
         `Tickets are 100% NON-REFUNDABLE once payment is completed.\n\nContinue?`
     );
     if (!confirmed) return;
 
     try {
-        const res = await bookingApiCall('/hold', 'POST', {
+        // Step 1: Hold the seats
+        const holdRes = await bookingApiCall('/hold', 'POST', {
             showId: activeShowContext.showId,
             seatCodes: selectedSeats
         });
 
-        const booking = res.data;
+        const booking = holdRes.data;
         activeBookingId = booking.bookingId;
         holdExpiresAt = new Date(booking.holdExpiresAt).getTime();
 
@@ -716,7 +718,7 @@ async function proceedToPayment() {
 
         showAlert(
             `Seats held: ${booking.seatCodes.join(', ')} | Total ₹${booking.totalAmount} | ` +
-            `Transaction ref: ${booking.transactionId}. Complete payment within 10 minutes.`,
+            `Transaction ref: ${booking.transactionId}.`,
             'success'
         );
 
@@ -724,8 +726,63 @@ async function proceedToPayment() {
         await fetchAndRenderSeats(activeShowContext.showId);
         selectedSeats = [];
         updateCheckoutBar();
-        // Payment module (Razorpay) plugs in here next - for now the hold itself
-        // is the end of the booking-core flow.
+
+        // Step 2: Create Razorpay order (this extends hold to 20 minutes)
+        const orderRes = await bookingApiCall('/payment/orders', 'POST', {
+            bookingId: activeBookingId
+        });
+
+        const order = orderRes.data;
+        
+        // Update countdown to reflect extended hold
+        holdExpiresAt = new Date(order.expiresAt).getTime();
+        saveHoldSession();
+
+        // Step 3: Open Razorpay Checkout
+        const options = {
+            key: order.razorpayKeyId,
+            amount: Math.round(parseFloat(order.amount) * 100), // Convert to paise
+            currency: order.currency,
+            name: 'Movie Booking System',
+            description: 'Ticket Purchase',
+            order_id: order.razorpayOrderId,
+            handler: async function(response) {
+                // Payment successful - verify on server
+                try {
+                    const verifyRes = await bookingApiCall('/payment/verify', 'POST', {
+                        razorpayOrderId: response.razorpay_order_id,
+                        razorpayPaymentId: response.razorpay_payment_id,
+                        razorpaySignature: response.razorpay_signature
+                    });
+
+                    if (verifyRes.success) {
+                        showAlert('Payment successful! Your booking is confirmed.', 'success');
+                        clearHoldSession();
+                        // Redirect to bookings page or confirmation
+                        setTimeout(() => window.location.href = '/auth.html', 2000);
+                    }
+                } catch (err) {
+                    showAlert('Payment verification failed. Please contact support.', 'error');
+                }
+            },
+            prefill: {
+                name: localStorage.getItem('userName') || '',
+                email: localStorage.getItem('userEmail') || '',
+                contact: ''
+            },
+            theme: {
+                color: '#6c5ce7'
+            },
+            modal: {
+                ondismiss: function() {
+                    showAlert('Payment cancelled. Your seats will be released in 20 minutes.', 'error');
+                }
+            }
+        };
+
+        const rzp = new Razorpay(options);
+        rzp.open();
+
     } catch (err) {
         // Error already shown by bookingApiCall; refresh seat map since
         // someone may have grabbed a seat in the meantime.

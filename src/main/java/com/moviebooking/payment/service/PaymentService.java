@@ -2,7 +2,10 @@ package com.moviebooking.payment.service;
 
 import com.moviebooking.booking.model.Booking;
 import com.moviebooking.booking.model.BookingStatus;
+import com.moviebooking.booking.model.SeatStatus;
+import com.moviebooking.booking.model.ShowSeat;
 import com.moviebooking.booking.repository.BookingRepository;
+import com.moviebooking.booking.repository.ShowSeatRepository;
 import com.moviebooking.common.exception.BusinessException;
 import com.moviebooking.common.exception.ResourceNotFoundException;
 import com.moviebooking.payment.dto.CreateOrderRequest;
@@ -41,19 +44,23 @@ public class PaymentService {
 
     private final PaymentTransactionRepository paymentRepository;
     private final BookingRepository bookingRepository;
+    private final ShowSeatRepository showSeatRepository;
     private final SeatStreamService seatStreamService;
 
     public PaymentService(PaymentTransactionRepository paymentRepository,
                          BookingRepository bookingRepository,
+                         ShowSeatRepository showSeatRepository,
                          SeatStreamService seatStreamService) {
         this.paymentRepository = paymentRepository;
         this.bookingRepository = bookingRepository;
+        this.showSeatRepository = showSeatRepository;
         this.seatStreamService = seatStreamService;
     }
 
     /**
      * Create a Razorpay order for a booking.
      * Validates that the booking hold is still active before allowing payment.
+     * Extends the hold to 20 minutes from now to give user time to complete payment.
      */
     @Transactional
     public OrderResponse createOrder(CreateOrderRequest req) {
@@ -99,6 +106,23 @@ public class PaymentService {
             return toOrderResponse(existing);
         }
 
+        // Extend hold to 20 minutes from now to allow time for payment completion
+        LocalDateTime newHoldExpiry = now.plusMinutes(20);
+        booking.setHoldExpiresAt(newHoldExpiry);
+        
+        // Update all held seats with new expiry
+        List<ShowSeat> heldSeats = showSeatRepository.findByBookingIdAndStatusForUpdate(
+            booking.getId(), 
+            SeatStatus.HELD
+        );
+        for (ShowSeat seat : heldSeats) {
+            seat.setHoldExpiresAt(newHoldExpiry);
+        }
+        showSeatRepository.saveAll(heldSeats);
+        bookingRepository.save(booking);
+        
+        log.info("Extended hold for booking {} to {}", booking.getId(), newHoldExpiry);
+
         // Create new payment transaction
         PaymentTransaction transaction = new PaymentTransaction();
         transaction.setTransactionId(booking.getTransactionId());
@@ -110,6 +134,7 @@ public class PaymentService {
         // Generate Razorpay order ID (in real implementation, call Razorpay API here)
         String razorpayOrderId = "order_" + System.currentTimeMillis() + "_" + booking.getId();
         transaction.setRazorpayOrderId(razorpayOrderId);
+        transaction.setExpiresAt(newHoldExpiry); // Match payment expiry to hold expiry
         
         PaymentTransaction saved = paymentRepository.save(transaction);
         
